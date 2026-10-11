@@ -124,26 +124,33 @@ export function isGoodPhotoData(url?: string | null): boolean {
 }
 
 /**
- * Merge two photo lists preserving full-resolution photos
+ * Merge two photo lists preserving full-resolution photos and respecting deletions
  */
 export function mergePhotoListsSafely(
   localPhotos: MomentPhoto[] = [],
-  incomingPhotos: MomentPhoto[] = []
+  incomingPhotos: MomentPhoto[] = [],
+  deletedPhotoIds: string[] = []
 ): MomentPhoto[] {
+  const deletedSet = new Set(deletedPhotoIds || []);
   const map = new Map<string, MomentPhoto>();
 
-  // 1. Start with incoming photos
-  incomingPhotos.forEach((ph) => {
-    if (ph && ph.id) {
-      map.set(ph.id, {
-        ...ph,
-        dataUrl: normalizePhotoUrl(ph.dataUrl, ph.caption),
-      });
-    }
+  // Filter out any explicitly deleted photos
+  const cleanIncoming = (incomingPhotos || []).filter((p) => p && p.id && !deletedSet.has(p.id));
+  const cleanLocal = (localPhotos || []).filter((p) => p && p.id && !deletedSet.has(p.id));
+
+  // 1. Start with incoming photos (only real photos, never mock/placeholder SVGs if local exists)
+  cleanIncoming.forEach((ph) => {
+    if (!ph || !ph.id) return;
+    // If incoming is just an SVG placeholder and local project exists, don't resurrect it
+    if (!isGoodPhotoData(ph.dataUrl) && cleanLocal.length > 0) return;
+    map.set(ph.id, {
+      ...ph,
+      dataUrl: normalizePhotoUrl(ph.dataUrl, ph.caption),
+    });
   });
 
   // 2. Overlay local photos with ABSOLUTE PRIORITY for real camera photos
-  localPhotos.forEach((locPh) => {
+  cleanLocal.forEach((locPh) => {
     if (!locPh || !locPh.id) return;
     const existing = map.get(locPh.id);
     if (!existing) {
@@ -188,7 +195,7 @@ export function mergePhotoListsSafely(
     }
   });
 
-  return Array.from(map.values());
+  return Array.from(map.values()).filter((p) => !deletedSet.has(p.id));
 }
 
 /**
@@ -198,25 +205,40 @@ export function mergeProjectSafely(
   localProj: Project | undefined,
   incomingProj: Project
 ): Project {
+  // Aggregate all deleted photo IDs from both versions
+  const combinedDeletedSet = new Set<string>([
+    ...(localProj?.deletedPhotoIds || []),
+    ...(incomingProj?.deletedPhotoIds || []),
+  ]);
+
   if (!localProj) {
     // Normalize any photos in incoming project
     const normalizedMoments: Record<string, MomentRecord> = {};
     if (incomingProj.moments) {
       for (const [mId, mom] of Object.entries(incomingProj.moments)) {
+        const momDeleted = new Set([...(mom.deletedPhotoIds || []), ...combinedDeletedSet]);
+        const cleanPhotos = (mom.photos || [])
+          .filter((p) => p && p.id && !momDeleted.has(p.id))
+          .map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) }));
+
         normalizedMoments[mId] = {
           ...mom,
-          photoBase64: mom.photoBase64 && !isTruncatedPhoto(mom.photoBase64) ? normalizePhotoUrl(mom.photoBase64) : undefined,
-          photos: mom.photos ? mom.photos.map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })) : [],
+          deletedPhotoIds: Array.from(momDeleted),
+          photoBase64: mom.photoBase64 && !isTruncatedPhoto(mom.photoBase64) && !momDeleted.has('p_1') ? normalizePhotoUrl(mom.photoBase64) : undefined,
+          photos: cleanPhotos,
         };
       }
     }
-    const normalizedPre = (incomingProj.preInspectionPhotos || []).map((p) => ({
-      ...p,
-      dataUrl: normalizePhotoUrl(p.dataUrl, p.caption),
-    }));
+    const normalizedPre = (incomingProj.preInspectionPhotos || [])
+      .filter((p) => p && p.id && !combinedDeletedSet.has(p.id))
+      .map((p) => ({
+        ...p,
+        dataUrl: normalizePhotoUrl(p.dataUrl, p.caption),
+      }));
 
     const enrichedIncoming = {
       ...incomingProj,
+      deletedPhotoIds: Array.from(combinedDeletedSet),
       moments: normalizedMoments,
       preInspectionPhotos: normalizedPre,
     };
@@ -244,36 +266,57 @@ export function mergeProjectSafely(
   allMomentIds.forEach((mId) => {
     const locMom = localProj.moments?.[mId];
     const incMom = incomingProj.moments?.[mId];
+    const momentDeletedSet = new Set<string>([
+      ...combinedDeletedSet,
+      ...(locMom?.deletedPhotoIds || []),
+      ...(incMom?.deletedPhotoIds || []),
+    ]);
 
     if (locMom && !incMom) {
+      const cleanPhotos = (locMom.photos || [])
+        .filter((p) => p && p.id && !momentDeletedSet.has(p.id))
+        .map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) }));
+
       mergedMoments[mId] = {
         ...locMom,
-        photoBase64: locMom.photoBase64 && !isTruncatedPhoto(locMom.photoBase64) ? normalizePhotoUrl(locMom.photoBase64) : undefined,
-        photos: (locMom.photos || []).map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })),
+        deletedPhotoIds: Array.from(momentDeletedSet),
+        photoBase64: locMom.photoBase64 && !isTruncatedPhoto(locMom.photoBase64) && !momentDeletedSet.has('p_1') ? normalizePhotoUrl(locMom.photoBase64) : undefined,
+        photos: cleanPhotos,
       };
     } else if (!locMom && incMom) {
+      const cleanPhotos = (incMom.photos || [])
+        .filter((p) => p && p.id && !momentDeletedSet.has(p.id))
+        .map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) }));
+
       mergedMoments[mId] = {
         ...incMom,
-        photoBase64: incMom.photoBase64 && !isTruncatedPhoto(incMom.photoBase64) ? normalizePhotoUrl(incMom.photoBase64) : undefined,
-        photos: (incMom.photos || []).map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })),
+        deletedPhotoIds: Array.from(momentDeletedSet),
+        photoBase64: incMom.photoBase64 && !isTruncatedPhoto(incMom.photoBase64) && !momentDeletedSet.has('p_1') ? normalizePhotoUrl(incMom.photoBase64) : undefined,
+        photos: cleanPhotos,
       };
     } else if (locMom && incMom) {
-      // Merge photos safely: local real photos NEVER get wiped out!
-      const mergedPhotos = mergePhotoListsSafely(locMom.photos || [], incMom.photos || []);
+      // Merge photos safely: local real photos NEVER get wiped out, and deleted photos NEVER return!
+      const mergedPhotos = mergePhotoListsSafely(
+        locMom.photos || [],
+        incMom.photos || [],
+        Array.from(momentDeletedSet)
+      );
 
       // Determine best photoBase64
       let bestBase64: string | undefined = undefined;
-      if (locMom.photoBase64 && isGoodPhotoData(locMom.photoBase64)) {
+      if (locMom.photoBase64 && isGoodPhotoData(locMom.photoBase64) && !momentDeletedSet.has('p_1')) {
         bestBase64 = locMom.photoBase64;
-      } else if (incMom.photoBase64 && isGoodPhotoData(incMom.photoBase64)) {
+      } else if (incMom.photoBase64 && isGoodPhotoData(incMom.photoBase64) && !momentDeletedSet.has('p_1')) {
         bestBase64 = incMom.photoBase64;
       } else {
         // Find first good photo from mergedPhotos list
         const firstGood = mergedPhotos.find((p) => isGoodPhotoData(p.dataUrl));
         if (firstGood) {
           bestBase64 = firstGood.dataUrl;
+        } else if (mergedPhotos.length > 0) {
+          bestBase64 = mergedPhotos[0].dataUrl;
         } else {
-          bestBase64 = locMom.photoBase64 || incMom.photoBase64;
+          bestBase64 = undefined;
         }
       }
       if (bestBase64) {
@@ -290,6 +333,7 @@ export function mergeProjectSafely(
         comment: incMom.comment || locMom.comment,
         completedAt: incMom.completedAt || locMom.completedAt,
         photos: mergedPhotos,
+        deletedPhotoIds: Array.from(momentDeletedSet),
         photoBase64: bestBase64,
       };
     }
@@ -297,7 +341,8 @@ export function mergeProjectSafely(
 
   const mergedPrePhotos = mergePhotoListsSafely(
     localProj.preInspectionPhotos || [],
-    incomingProj.preInspectionPhotos || []
+    incomingProj.preInspectionPhotos || [],
+    Array.from(combinedDeletedSet)
   );
 
   // CRITICAL: Preserve groupCode and sync flags so sync connection NEVER gets removed or disconnected!

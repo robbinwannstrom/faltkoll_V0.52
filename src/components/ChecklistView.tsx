@@ -18,7 +18,7 @@ import { FieldHelperModal } from './FieldHelperModal';
 import { MomentAiHelperModal } from './MomentAiHelperModal';
 import { fileToBase64Optimized, getFormattedCurrentTime } from '../db/indexedDb';
 import { getDefaultCategoryForMoment, savePhotoToDeviceGallery } from '../utils/photoStorage';
-import { normalizePhotoUrl, createPhotoPlaceholderSvg, isTruncatedPhoto } from '../utils/photoUtils';
+import { normalizePhotoUrl, createPhotoPlaceholderSvg, isTruncatedPhoto, isGoodPhotoData } from '../utils/photoUtils';
 import { getSuggestionsForMoment } from '../data/momentCheckSuggestions';
 import {
   saveProjectToCloud,
@@ -399,23 +399,64 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
   };
 
   const handleDeletePhotoFromMoment = (momentId: string, photoId: string) => {
-    const existing = project.moments[momentId];
-    if (!existing || !existing.photos) return;
+    const existing: MomentRecord = project.moments[momentId] || {
+      momentId,
+      status: 'RED',
+      comment: '',
+      signature: '',
+    };
 
-    const filtered = existing.photos.filter((p) => p.id !== photoId);
+    const currentPhotos =
+      existing.photos && existing.photos.length > 0
+        ? existing.photos
+        : existing.photoBase64
+        ? [
+            {
+              id: 'p_1',
+              dataUrl: existing.photoBase64,
+              capturedAt: existing.completedAt || '',
+              category: getDefaultCategoryForMoment(momentId, ''),
+            },
+          ]
+        : [];
+
+    const filtered = currentPhotos.filter((p) => p.id !== photoId);
+    const updatedDeletedIds = Array.from(
+      new Set([
+        ...(project.deletedPhotoIds || []),
+        ...(existing.deletedPhotoIds || []),
+        photoId,
+      ])
+    );
+
+    const remainingGood = filtered.filter((p) => isGoodPhotoData(p.dataUrl));
+    const newBase64 =
+      remainingGood.length > 0
+        ? remainingGood[0].dataUrl
+        : filtered.length > 0
+        ? filtered[0].dataUrl
+        : undefined;
+
     const updatedRecord: MomentRecord = {
       ...existing,
       photos: filtered,
-      photoBase64: filtered.length > 0 ? filtered[0].dataUrl : undefined,
+      deletedPhotoIds: updatedDeletedIds,
+      photoBase64: newBase64,
     };
 
-    onUpdateProject({
+    const updatedProject: Project = {
       ...project,
+      deletedPhotoIds: updatedDeletedIds,
       moments: {
         ...project.moments,
         [momentId]: updatedRecord,
       },
-    });
+      updatedAt: getFormattedCurrentTime(),
+    };
+
+    onUpdateProject(updatedProject);
+    setCloudSyncMsg('Fotot togs bort permanent från momentet!');
+    setTimeout(() => setCloudSyncMsg(null), 3000);
   };
 
   // Update moment comment / notes
@@ -1939,10 +1980,14 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
             signature: '',
           };
           const status = record.status || 'RED';
+          const deletedSet = new Set<string>([
+            ...(project.deletedPhotoIds || []),
+            ...(record.deletedPhotoIds || []),
+          ]);
           const rawPhotos =
             record.photos && record.photos.length > 0
-              ? record.photos
-              : record.photoBase64
+              ? record.photos.filter((p) => p && p.id && !deletedSet.has(p.id))
+              : record.photoBase64 && !deletedSet.has('p_1') && isGoodPhotoData(record.photoBase64)
               ? [
                   {
                     id: 'p_1',
@@ -1952,10 +1997,12 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                   },
                 ]
               : [];
-          const photos = rawPhotos.map((p) => ({
-            ...p,
-            dataUrl: normalizePhotoUrl(p.dataUrl, `${moment.id} ${moment.title}`),
-          }));
+          const photos = rawPhotos
+            .filter((p) => p && p.id && !deletedSet.has(p.id))
+            .map((p) => ({
+              ...p,
+              dataUrl: normalizePhotoUrl(p.dataUrl, `${moment.id} ${moment.title}`),
+            }));
           return { record, status, photos };
         };
 
@@ -2726,6 +2773,7 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
           userSettings={userSettings}
           onUpdateUserSettings={onUpdateUserSettings}
           onClose={() => setIsArchiveOpen(false)}
+          onDeletePhoto={(momentId, photoId) => handleDeletePhotoFromMoment(momentId, photoId)}
           onOpenLightbox={(url, title) => setLightboxPhoto({ url, title })}
         />
       )}

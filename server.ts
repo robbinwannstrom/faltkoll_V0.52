@@ -3800,6 +3800,11 @@ function mergeServerProjectSafely(existing: any, incoming: any): any {
   if (!existing) return incoming;
   if (!incoming) return existing;
 
+  const finalDeletedIds = new Set<string>([
+    ...(Array.isArray(incoming.deletedPhotoIds) ? incoming.deletedPhotoIds : []),
+    ...(Array.isArray(existing.deletedPhotoIds) ? existing.deletedPhotoIds : []),
+  ]);
+
   const finalGroupCode = (incoming.groupCode?.trim() || existing.groupCode?.trim() || '').toUpperCase();
   const finalIsGroup = Boolean(incoming.isGroupProject || existing.isGroupProject || finalGroupCode.length > 0);
   const finalSync = incoming.syncEnabled !== undefined ? incoming.syncEnabled : (existing.syncEnabled !== undefined ? existing.syncEnabled : true);
@@ -3817,25 +3822,45 @@ function mergeServerProjectSafely(existing: any, incoming: any): any {
   allMomIds.forEach((mId) => {
     const exM = existing.moments?.[mId];
     const inM = incoming.moments?.[mId];
+    const momDeleted = new Set<string>([
+      ...finalDeletedIds,
+      ...(Array.isArray(exM?.deletedPhotoIds) ? exM.deletedPhotoIds : []),
+      ...(Array.isArray(inM?.deletedPhotoIds) ? inM.deletedPhotoIds : []),
+    ]);
 
     if (exM && !inM) {
-      mergedMoments[mId] = exM;
+      const cleanEx = (exM.photos || []).filter((p: any) => p && p.id && !momDeleted.has(p.id));
+      mergedMoments[mId] = {
+        ...exM,
+        photos: cleanEx,
+        deletedPhotoIds: Array.from(momDeleted),
+        photoBase64: momDeleted.has('p_1') ? undefined : exM.photoBase64,
+      };
     } else if (!exM && inM) {
-      mergedMoments[mId] = inM;
+      const cleanIn = (inM.photos || []).filter((p: any) => p && p.id && !momDeleted.has(p.id));
+      mergedMoments[mId] = {
+        ...inM,
+        photos: cleanIn,
+        deletedPhotoIds: Array.from(momDeleted),
+        photoBase64: momDeleted.has('p_1') ? undefined : inM.photoBase64,
+      };
     } else if (exM && inM) {
-      const exPhotos: any[] = exM.photos || [];
-      const inPhotos: any[] = inM.photos || [];
+      const exPhotos: any[] = (exM.photos || []).filter((p: any) => p && p.id && !momDeleted.has(p.id));
+      const inPhotos: any[] = (inM.photos || []).filter((p: any) => p && p.id && !momDeleted.has(p.id));
 
       const photoMap = new Map<string, any>();
       inPhotos.forEach((p) => {
-        if (p && p.id) photoMap.set(p.id, p);
+        if (p && p.id && !momDeleted.has(p.id)) photoMap.set(p.id, p);
       });
 
       exPhotos.forEach((exP) => {
-        if (!exP || !exP.id) return;
+        if (!exP || !exP.id || momDeleted.has(exP.id)) return;
         const inP = photoMap.get(exP.id);
         if (!inP) {
-          photoMap.set(exP.id, exP);
+          // Never restore SVG mock placeholders from existing!
+          if (isGoodServerPhoto(exP.dataUrl)) {
+            photoMap.set(exP.id, exP);
+          }
         } else {
           const exGood = isGoodServerPhoto(exP.dataUrl);
           const inGood = isGoodServerPhoto(inP.dataUrl);
@@ -3852,12 +3877,13 @@ function mergeServerProjectSafely(existing: any, incoming: any): any {
         }
       });
 
-      const mergedPhotos = Array.from(photoMap.values());
-      let bestB64 = isGoodServerPhoto(inM.photoBase64) ? inM.photoBase64 : (isGoodServerPhoto(exM.photoBase64) ? exM.photoBase64 : undefined);
+      const mergedPhotos = Array.from(photoMap.values()).filter((p) => !momDeleted.has(p.id));
+      let bestB64 = isGoodServerPhoto(inM.photoBase64) && !momDeleted.has('p_1') ? inM.photoBase64 : (isGoodServerPhoto(exM.photoBase64) && !momDeleted.has('p_1') ? exM.photoBase64 : undefined);
       if (!bestB64) {
         const goodP = mergedPhotos.find((p) => isGoodServerPhoto(p.dataUrl));
         if (goodP) bestB64 = goodP.dataUrl;
-        else bestB64 = inM.photoBase64 || exM.photoBase64;
+        else if (mergedPhotos.length > 0) bestB64 = mergedPhotos[0].dataUrl;
+        else bestB64 = undefined;
       }
 
       mergedMoments[mId] = {
@@ -3869,21 +3895,30 @@ function mergeServerProjectSafely(existing: any, incoming: any): any {
         comment: inM.comment || exM.comment,
         completedAt: inM.completedAt || exM.completedAt,
         photos: mergedPhotos,
+        deletedPhotoIds: Array.from(momDeleted),
         photoBase64: bestB64,
       };
     }
   });
 
+  const exPre = (existing.preInspectionPhotos || []).filter((p: any) => p && p.id && !finalDeletedIds.has(p.id));
+  const inPre = (incoming.preInspectionPhotos || []).filter((p: any) => p && p.id && !finalDeletedIds.has(p.id));
+  const preMap = new Map<string, any>();
+  inPre.forEach((p: any) => preMap.set(p.id, p));
+  exPre.forEach((p: any) => {
+    if (!preMap.has(p.id) && isGoodServerPhoto(p.dataUrl)) preMap.set(p.id, p);
+  });
+  const mergedPrePhotos = Array.from(preMap.values());
+
   return {
     ...existing,
     ...incoming,
+    deletedPhotoIds: Array.from(finalDeletedIds),
     groupCode: finalGroupCode || undefined,
     isGroupProject: finalIsGroup,
     syncEnabled: finalSync,
     moments: mergedMoments,
-    preInspectionPhotos: (incoming.preInspectionPhotos && incoming.preInspectionPhotos.length > 0)
-      ? incoming.preInspectionPhotos
-      : (existing.preInspectionPhotos || []),
+    preInspectionPhotos: mergedPrePhotos,
   };
 }
 

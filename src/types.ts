@@ -44,6 +44,7 @@ export interface MomentRecord {
   structuredChecks?: string[];
   photoBase64?: string;
   photos?: MomentPhoto[];
+  deletedPhotoIds?: string[];
   completedAt?: string;
   completedTimestamp?: number;
   weather?: WeatherType;
@@ -112,6 +113,7 @@ export interface Project {
   preInspectionExempted?: boolean;
   preInspectionExemptReason?: string;
   preInspectionPhotos?: MomentPhoto[];
+  deletedPhotoIds?: string[];
   // Fältmått & Beräknat Kryssmått (automatisk ifyllnad i moment)
   fieldMeasurements?: {
     sideA?: number; // Längd i meter (t.ex. 10.00)

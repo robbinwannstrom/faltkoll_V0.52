@@ -49,37 +49,61 @@ function openDB(): Promise<IDBDatabase> {
 function repairProjectPhotos(p: Project): Project {
   if (!p) return p;
   let changed = false;
+  const projectDeleted = new Set<string>(p.deletedPhotoIds || []);
   const newMoments: Record<string, any> = {};
+
   if (p.moments) {
     for (const [mId, m] of Object.entries(p.moments)) {
       let mChanged = false;
+      const momentDeleted = new Set<string>([...(m.deletedPhotoIds || []), ...projectDeleted]);
+
       let fixedPhotos = m.photos;
       if (m.photos) {
-        fixedPhotos = m.photos.map((ph) => {
+        // Strip out explicitly deleted photos AND mock SVG placeholder boxes
+        const nonDeleted = m.photos.filter((ph: any) => {
+          if (!ph || !ph.id) return false;
+          if (momentDeleted.has(ph.id)) return false;
+          if (typeof ph.dataUrl === 'string' && ph.dataUrl.startsWith('data:image/svg+xml')) return false;
+          return true;
+        });
+        if (nonDeleted.length !== m.photos.length) mChanged = true;
+
+        fixedPhotos = nonDeleted.map((ph: any) => {
           const safe = normalizePhotoUrl(ph.dataUrl, ph.caption);
           if (safe !== ph.dataUrl) mChanged = true;
           return { ...ph, dataUrl: safe };
         });
       }
+
       let fixedB64 = m.photoBase64;
       if (m.photoBase64) {
-        const safe = normalizePhotoUrl(m.photoBase64);
-        if (safe !== m.photoBase64) mChanged = true;
-        fixedB64 = safe;
+        if (momentDeleted.has('p_1') || (typeof m.photoBase64 === 'string' && m.photoBase64.startsWith('data:image/svg+xml'))) {
+          fixedB64 = fixedPhotos && fixedPhotos.length > 0 ? fixedPhotos[0].dataUrl : undefined;
+          mChanged = true;
+        } else {
+          const safe = normalizePhotoUrl(m.photoBase64);
+          if (safe !== m.photoBase64) mChanged = true;
+          fixedB64 = safe;
+        }
       }
       if (mChanged) changed = true;
-      newMoments[mId] = mChanged ? { ...m, photos: fixedPhotos, photoBase64: fixedB64 } : m;
+      newMoments[mId] = mChanged ? { ...m, photos: fixedPhotos, photoBase64: fixedB64, deletedPhotoIds: Array.from(momentDeleted) } : m;
     }
   }
+
   let fixedPre = p.preInspectionPhotos;
   if (p.preInspectionPhotos) {
-    fixedPre = p.preInspectionPhotos.map((ph) => {
+    const nonDeletedPre = p.preInspectionPhotos.filter((ph: any) => ph && ph.id && !projectDeleted.has(ph.id));
+    if (nonDeletedPre.length !== p.preInspectionPhotos.length) changed = true;
+
+    fixedPre = nonDeletedPre.map((ph: any) => {
       const safe = normalizePhotoUrl(ph.dataUrl, ph.caption);
       if (safe !== ph.dataUrl) changed = true;
       return { ...ph, dataUrl: safe };
     });
   }
-  return changed ? { ...p, moments: newMoments, preInspectionPhotos: fixedPre } : p;
+
+  return changed ? { ...p, moments: newMoments, preInspectionPhotos: fixedPre, deletedPhotoIds: Array.from(projectDeleted) } : p;
 }
 
 export async function getAllProjects(includeDeleted = false): Promise<Project[]> {
