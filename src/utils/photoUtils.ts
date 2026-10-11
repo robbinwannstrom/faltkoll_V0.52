@@ -49,9 +49,9 @@ export function createPhotoPlaceholderSvg(
 export function isTruncatedPhoto(url?: string | null): boolean {
   if (!url || typeof url !== 'string') return false;
   return (
-    url.includes('[CLOUDSYNC_PHOTO_REF]') ||
-    url.includes('[BILD_SPARAD]') ||
-    url.includes('[BILD_SPARAD_I_INDEXEDDB]')
+    url.includes('[CLOUDSYNC') ||
+    url.includes('[BILD_SPARAD') ||
+    (url.startsWith('data:image/jpeg') && url.length < 500)
   );
 }
 
@@ -66,7 +66,7 @@ export function normalizePhotoUrl(dataUrl?: string | null, fallbackTitle?: strin
   if (isTruncatedPhoto(trimmed)) {
     return createPhotoPlaceholderSvg(
       fallbackTitle || 'Kontrollfoto bevarat',
-      'Klicka "Ersätt foto" för att uppdatera med originalbild'
+      'Klicka "Ladda upp / Ersätt" för att uppdatera med originalbild'
     );
   }
 
@@ -103,15 +103,24 @@ export function normalizePhotoUrl(dataUrl?: string | null, fallbackTitle?: strin
  */
 export function isGoodPhotoData(url?: string | null): boolean {
   if (!url || typeof url !== 'string') return false;
-  if (url.includes('[CLOUDSYNC_PHOTO_REF]')) return false;
-  if (url.includes('[BILD_SPARAD]')) return false;
-  if (url.includes('[BILD_SPARAD_I_INDEXEDDB]')) return false;
-  // SVG placeholder is inferior to real camera base64 JPEG/PNG
-  if (url.startsWith('data:image/svg+xml') && (url.includes('FÄLTDOKUMENTATION') || url.includes('Kontrollfoto bevarat'))) {
-    return false;
+  const clean = url.trim();
+  if (clean.includes('[CLOUDSYNC')) return false;
+  if (clean.includes('[BILD_SPARAD')) return false;
+  // All SVG data URLs are placeholders/icons, NOT real captured camera photos!
+  if (clean.startsWith('data:image/svg+xml')) return false;
+  // Broken or truncated JPEG data URLs
+  if (clean.startsWith('data:image/jpeg') && clean.length < 500) return false;
+  // Valid real photos are long JPEG/PNG/WebP data URLs or standard web URLs
+  if (
+    clean.startsWith('data:image/jpeg') ||
+    clean.startsWith('data:image/png') ||
+    clean.startsWith('data:image/webp') ||
+    clean.startsWith('http://') ||
+    clean.startsWith('https://')
+  ) {
+    return true;
   }
-  if (url.startsWith('data:image/jpeg') && url.length < 500) return false;
-  return true;
+  return false;
 }
 
 /**
@@ -123,7 +132,7 @@ export function mergePhotoListsSafely(
 ): MomentPhoto[] {
   const map = new Map<string, MomentPhoto>();
 
-  // Start with incoming photos
+  // 1. Start with incoming photos
   incomingPhotos.forEach((ph) => {
     if (ph && ph.id) {
       map.set(ph.id, {
@@ -133,7 +142,7 @@ export function mergePhotoListsSafely(
     }
   });
 
-  // Overlay local photos, preferring whichever has non-truncated high-resolution data
+  // 2. Overlay local photos with ABSOLUTE PRIORITY for real camera photos
   localPhotos.forEach((locPh) => {
     if (!locPh || !locPh.id) return;
     const existing = map.get(locPh.id);
@@ -147,24 +156,33 @@ export function mergePhotoListsSafely(
       const extIsGood = isGoodPhotoData(existing.dataUrl);
 
       if (locIsGood && !extIsGood) {
+        // Local is a real high-res photo, incoming is placeholder/truncated: LOCAL WINS!
         map.set(locPh.id, {
           ...existing,
           ...locPh,
           dataUrl: locPh.dataUrl,
         });
       } else if (!locIsGood && extIsGood) {
+        // Incoming is a real photo, local is placeholder: INCOMING WINS!
         map.set(locPh.id, {
           ...locPh,
           ...existing,
           dataUrl: existing.dataUrl,
         });
-      } else {
-        // Both good or both placeholder: pick longer data or newest
-        const longer = (locPh.dataUrl?.length || 0) >= (existing.dataUrl?.length || 0) ? locPh : existing;
+      } else if (locIsGood && extIsGood) {
+        // Both are real photos: pick whichever has larger resolution / data length
+        const preferred = (locPh.dataUrl?.length || 0) >= (existing.dataUrl?.length || 0) ? locPh : existing;
         map.set(locPh.id, {
           ...existing,
           ...locPh,
-          dataUrl: longer.dataUrl || existing.dataUrl || locPh.dataUrl,
+          dataUrl: preferred.dataUrl || locPh.dataUrl,
+        });
+      } else {
+        // Both are placeholders: prefer whichever has clean data
+        map.set(locPh.id, {
+          ...existing,
+          ...locPh,
+          dataUrl: locPh.dataUrl || existing.dataUrl,
         });
       }
     }
@@ -187,7 +205,7 @@ export function mergeProjectSafely(
       for (const [mId, mom] of Object.entries(incomingProj.moments)) {
         normalizedMoments[mId] = {
           ...mom,
-          photoBase64: mom.photoBase64 ? normalizePhotoUrl(mom.photoBase64) : undefined,
+          photoBase64: mom.photoBase64 && !isTruncatedPhoto(mom.photoBase64) ? normalizePhotoUrl(mom.photoBase64) : undefined,
           photos: mom.photos ? mom.photos.map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })) : [],
         };
       }
@@ -230,23 +248,37 @@ export function mergeProjectSafely(
     if (locMom && !incMom) {
       mergedMoments[mId] = {
         ...locMom,
-        photoBase64: locMom.photoBase64 ? normalizePhotoUrl(locMom.photoBase64) : undefined,
+        photoBase64: locMom.photoBase64 && !isTruncatedPhoto(locMom.photoBase64) ? normalizePhotoUrl(locMom.photoBase64) : undefined,
         photos: (locMom.photos || []).map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })),
       };
     } else if (!locMom && incMom) {
       mergedMoments[mId] = {
         ...incMom,
-        photoBase64: incMom.photoBase64 ? normalizePhotoUrl(incMom.photoBase64) : undefined,
+        photoBase64: incMom.photoBase64 && !isTruncatedPhoto(incMom.photoBase64) ? normalizePhotoUrl(incMom.photoBase64) : undefined,
         photos: (incMom.photos || []).map((p) => ({ ...p, dataUrl: normalizePhotoUrl(p.dataUrl, p.caption) })),
       };
     } else if (locMom && incMom) {
-      // Merge photos safely: if incoming photos is empty or missing, keep local photos!
+      // Merge photos safely: local real photos NEVER get wiped out!
       const mergedPhotos = mergePhotoListsSafely(locMom.photos || [], incMom.photos || []);
-      let bestBase64 = incMom.photoBase64 || locMom.photoBase64;
-      if (locMom.photoBase64 && isGoodPhotoData(locMom.photoBase64) && !isGoodPhotoData(incMom.photoBase64)) {
+
+      // Determine best photoBase64
+      let bestBase64: string | undefined = undefined;
+      if (locMom.photoBase64 && isGoodPhotoData(locMom.photoBase64)) {
         bestBase64 = locMom.photoBase64;
+      } else if (incMom.photoBase64 && isGoodPhotoData(incMom.photoBase64)) {
+        bestBase64 = incMom.photoBase64;
+      } else {
+        // Find first good photo from mergedPhotos list
+        const firstGood = mergedPhotos.find((p) => isGoodPhotoData(p.dataUrl));
+        if (firstGood) {
+          bestBase64 = firstGood.dataUrl;
+        } else {
+          bestBase64 = locMom.photoBase64 || incMom.photoBase64;
+        }
       }
-      bestBase64 = bestBase64 ? normalizePhotoUrl(bestBase64) : undefined;
+      if (bestBase64) {
+        bestBase64 = normalizePhotoUrl(bestBase64);
+      }
 
       mergedMoments[mId] = {
         ...locMom,

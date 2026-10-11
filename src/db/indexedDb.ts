@@ -113,9 +113,15 @@ export async function getAllProjects(includeDeleted = false): Promise<Project[]>
     });
   } catch (err) {
     console.warn('IndexedDB read error, falling back to localStorage', err);
-    const local = localStorage.getItem('faltkoll_projects_fallback');
-    const all = local ? JSON.parse(local) : [];
-    return includeDeleted ? all : all.filter((p: Project) => !p.isDeleted);
+    let all: Project[] = [];
+    try {
+      const local = localStorage.getItem('faltkoll_projects_cache') || localStorage.getItem('faltkoll_projects_fallback');
+      if (local) {
+        all = JSON.parse(local);
+      }
+    } catch {}
+    const repaired = all.map(repairProjectPhotos);
+    return includeDeleted ? repaired : repaired.filter((p: Project) => !p.isDeleted);
   }
 }
 

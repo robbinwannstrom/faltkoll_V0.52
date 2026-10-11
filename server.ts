@@ -3786,6 +3786,107 @@ app.get('/api/sync/projects/:id', (req, res) => {
   return res.json({ project: proj });
 });
 
+function isGoodServerPhoto(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const clean = url.trim();
+  if (clean.includes('[CLOUDSYNC')) return false;
+  if (clean.includes('[BILD_SPARAD')) return false;
+  if (clean.startsWith('data:image/svg+xml')) return false;
+  if (clean.startsWith('data:image/jpeg') && clean.length < 500) return false;
+  return clean.startsWith('data:image/') || clean.startsWith('http://') || clean.startsWith('https://');
+}
+
+function mergeServerProjectSafely(existing: any, incoming: any): any {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+
+  const finalGroupCode = (incoming.groupCode?.trim() || existing.groupCode?.trim() || '').toUpperCase();
+  const finalIsGroup = Boolean(incoming.isGroupProject || existing.isGroupProject || finalGroupCode.length > 0);
+  const finalSync = incoming.syncEnabled !== undefined ? incoming.syncEnabled : (existing.syncEnabled !== undefined ? existing.syncEnabled : true);
+
+  const mergedMoments: Record<string, any> = {
+    ...(existing.moments || {}),
+    ...(incoming.moments || {}),
+  };
+
+  const allMomIds = new Set([
+    ...Object.keys(existing.moments || {}),
+    ...Object.keys(incoming.moments || {}),
+  ]);
+
+  allMomIds.forEach((mId) => {
+    const exM = existing.moments?.[mId];
+    const inM = incoming.moments?.[mId];
+
+    if (exM && !inM) {
+      mergedMoments[mId] = exM;
+    } else if (!exM && inM) {
+      mergedMoments[mId] = inM;
+    } else if (exM && inM) {
+      const exPhotos: any[] = exM.photos || [];
+      const inPhotos: any[] = inM.photos || [];
+
+      const photoMap = new Map<string, any>();
+      inPhotos.forEach((p) => {
+        if (p && p.id) photoMap.set(p.id, p);
+      });
+
+      exPhotos.forEach((exP) => {
+        if (!exP || !exP.id) return;
+        const inP = photoMap.get(exP.id);
+        if (!inP) {
+          photoMap.set(exP.id, exP);
+        } else {
+          const exGood = isGoodServerPhoto(exP.dataUrl);
+          const inGood = isGoodServerPhoto(inP.dataUrl);
+          if (exGood && !inGood) {
+            photoMap.set(exP.id, { ...inP, ...exP, dataUrl: exP.dataUrl });
+          } else if (!exGood && inGood) {
+            photoMap.set(exP.id, { ...exP, ...inP, dataUrl: inP.dataUrl });
+          } else if (exGood && inGood) {
+            const preferred = (exP.dataUrl?.length || 0) >= (inP.dataUrl?.length || 0) ? exP : inP;
+            photoMap.set(exP.id, { ...inP, dataUrl: preferred.dataUrl });
+          } else {
+            photoMap.set(exP.id, inP);
+          }
+        }
+      });
+
+      const mergedPhotos = Array.from(photoMap.values());
+      let bestB64 = isGoodServerPhoto(inM.photoBase64) ? inM.photoBase64 : (isGoodServerPhoto(exM.photoBase64) ? exM.photoBase64 : undefined);
+      if (!bestB64) {
+        const goodP = mergedPhotos.find((p) => isGoodServerPhoto(p.dataUrl));
+        if (goodP) bestB64 = goodP.dataUrl;
+        else bestB64 = inM.photoBase64 || exM.photoBase64;
+      }
+
+      mergedMoments[mId] = {
+        ...exM,
+        ...inM,
+        status: inM.status === 'GREEN' || exM.status === 'GREEN' ? 'GREEN' : (inM.status || exM.status),
+        signature: inM.signature || exM.signature,
+        signatureImage: inM.signatureImage || exM.signatureImage,
+        comment: inM.comment || exM.comment,
+        completedAt: inM.completedAt || exM.completedAt,
+        photos: mergedPhotos,
+        photoBase64: bestB64,
+      };
+    }
+  });
+
+  return {
+    ...existing,
+    ...incoming,
+    groupCode: finalGroupCode || undefined,
+    isGroupProject: finalIsGroup,
+    syncEnabled: finalSync,
+    moments: mergedMoments,
+    preInspectionPhotos: (incoming.preInspectionPhotos && incoming.preInspectionPhotos.length > 0)
+      ? incoming.preInspectionPhotos
+      : (existing.preInspectionPhotos || []),
+  };
+}
+
 // POST /api/sync/projects - Push / sync project (moments, quickNotes, photos)
 app.post('/api/sync/projects', (req, res) => {
   const { project } = req.body;
@@ -3798,29 +3899,25 @@ app.post('/api/sync/projects', (req, res) => {
   project.updatedAt = now;
 
   const existing = cloudState.projects[project.id];
-  if (existing && !project.groupCode && existing.groupCode) {
-    project.groupCode = existing.groupCode;
-    project.isGroupProject = true;
-    project.syncEnabled = true;
+  const merged = mergeServerProjectSafely(existing, project);
+
+  if (merged.groupCode) {
+    merged.groupCode = String(merged.groupCode).trim().toUpperCase();
+    merged.isGroupProject = true;
+    merged.syncEnabled = true;
+  } else if (merged.isGroupProject && !merged.groupCode) {
+    merged.groupCode = 'BYGG-' + Math.floor(10 + Math.random() * 90);
+    merged.syncEnabled = true;
   }
 
-  if (project.groupCode) {
-    project.groupCode = String(project.groupCode).trim().toUpperCase();
-    project.isGroupProject = true;
-    project.syncEnabled = true;
-  } else if (project.isGroupProject && !project.groupCode) {
-    project.groupCode = 'BYGG-' + Math.floor(10 + Math.random() * 90);
-    project.syncEnabled = true;
-  }
-
-  cloudState.projects[project.id] = project;
+  cloudState.projects[project.id] = merged;
   saveStorage(cloudState);
 
   return res.json({
     success: true,
     lastSyncedAt: now,
-    groupCode: project.groupCode,
-    project,
+    groupCode: merged.groupCode,
+    project: merged,
   });
 });
 
@@ -3965,10 +4062,13 @@ app.post('/api/sync/push', (req, res) => {
   project.lastSyncedAt = now;
   project.updatedAt = now;
 
-  cloudState.projects[project.id] = project;
+  const existing = cloudState.projects[project.id];
+  const merged = mergeServerProjectSafely(existing, project);
+
+  cloudState.projects[project.id] = merged;
   saveStorage(cloudState);
 
-  return res.json({ success: true, lastSyncedAt: now, project });
+  return res.json({ success: true, lastSyncedAt: now, project: merged });
 });
 
 // ==========================================
@@ -4227,10 +4327,13 @@ app.post('/api/field/student-work', (req, res) => {
   project.lastSyncedAt = now;
   project.updatedAt = now;
 
-  cloudState.projects[project.id] = project;
+  const existing = cloudState.projects[project.id];
+  const merged = mergeServerProjectSafely(existing, project);
+
+  cloudState.projects[project.id] = merged;
   saveStorage(cloudState);
 
-  return res.json({ success: true, lastSyncedAt: now, project });
+  return res.json({ success: true, lastSyncedAt: now, project: merged });
 });
 
 // POST /api/field/sync-all-local - Batch sync multiple projects from local IndexedDB
@@ -4247,10 +4350,8 @@ app.post('/api/field/sync-all-local', (req, res) => {
     if (proj && proj.id) {
       proj.lastSyncedAt = now;
       if (!proj.updatedAt) proj.updatedAt = now;
-      cloudState.projects[proj.id] = {
-        ...(cloudState.projects[proj.id] || {}),
-        ...proj,
-      };
+      const existing = cloudState.projects[proj.id];
+      cloudState.projects[proj.id] = mergeServerProjectSafely(existing, proj);
       count++;
     }
   });

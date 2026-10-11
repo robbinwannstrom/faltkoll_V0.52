@@ -1,6 +1,7 @@
 import { Project, UserAccount } from '../types';
 import { safeFetchJson } from './apiHelper';
 import { getAllProjects, saveProject } from '../db/indexedDb';
+import { mergeProjectSafely } from '../utils/photoUtils';
 import {
   collection,
   doc,
@@ -120,6 +121,7 @@ export async function saveProjectToFirestore(project: Project): Promise<boolean>
 
     if (approxSize > 750000) {
       // Create a safe payload for parent doc where photo metadata is preserved
+      // (Full photos are already safely stored in /projects/{projectId}/photos subcollection)
       const safeMoments: Record<string, any> = {};
       if (cleanProject.moments) {
         for (const [mId, mom] of Object.entries(cleanProject.moments as Record<string, any>)) {
@@ -131,8 +133,8 @@ export async function saveProjectToFirestore(project: Project): Promise<boolean>
               category: p.category,
               caption: p.caption,
               momentId: mId,
-              // Only include dataUrl if reasonable size or reference
-              dataUrl: p.dataUrl?.length < 30000 ? p.dataUrl : p.dataUrl,
+              // Only include dataUrl if reasonable size (< 25KB), otherwise rely on photo subcollection
+              dataUrl: p.dataUrl && p.dataUrl.length < 25000 ? p.dataUrl : '',
             })),
           };
         }
@@ -497,7 +499,7 @@ export async function fetchStudentFieldWorks(
   // Local projects
   const localProjects = await getAllProjects(false);
 
-  // Merge projects from all 3 sources by project ID (prefer latest updatedAt)
+  // Merge projects from all 3 sources by project ID safely protecting photos and moment progress
   const projectMap = new Map<string, Project>();
   for (const p of [...localProjects, ...firestoreProjects, ...serverProjects]) {
     if (!p || !p.id) continue;
@@ -505,30 +507,13 @@ export async function fetchStudentFieldWorks(
     if (!existing) {
       projectMap.set(p.id, p);
     } else {
-      const timeA = Math.max(parseSafeTime(p.updatedAt), parseSafeTime(p.lastSyncedAt), parseSafeTime(p.createdAt));
-      const timeB = Math.max(parseSafeTime(existing.updatedAt), parseSafeTime(existing.lastSyncedAt), parseSafeTime(existing.createdAt));
-      if (timeA >= timeB) {
-        projectMap.set(p.id, {
-          ...existing,
-          ...p,
-          // Preserve student info if present in either
-          studentId: p.studentId || existing.studentId,
-          studentName: p.studentName || existing.studentName,
-          studentEmail: p.studentEmail || existing.studentEmail,
-          schoolClass: p.schoolClass || existing.schoolClass,
-          studentGroup: p.studentGroup || existing.studentGroup,
-        });
-      } else {
-        projectMap.set(p.id, {
-          ...p,
-          ...existing,
-          studentId: existing.studentId || p.studentId,
-          studentName: existing.studentName || p.studentName,
-          studentEmail: existing.studentEmail || p.studentEmail,
-          schoolClass: existing.schoolClass || p.schoolClass,
-          studentGroup: existing.studentGroup || p.studentGroup,
-        });
-      }
+      const merged = mergeProjectSafely(existing, p);
+      merged.studentId = p.studentId || existing.studentId;
+      merged.studentName = p.studentName || existing.studentName;
+      merged.studentEmail = p.studentEmail || existing.studentEmail;
+      merged.schoolClass = p.schoolClass || existing.schoolClass;
+      merged.studentGroup = p.studentGroup || existing.studentGroup;
+      projectMap.set(p.id, merged);
     }
   }
 
